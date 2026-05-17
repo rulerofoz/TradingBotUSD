@@ -1658,7 +1658,8 @@ class TradingBot:
                     else:
                         current_price = self.pair_prices.get(pair, 0)
 
-                if len(self.analysis_tool._get_price_history(pair)) < self.analysis_tool.max_history:
+                # Fix: Clean up the double object reference to restore the 60s sleep timing
+                if len(self.analysis_tool._get_price_history(pair)) < self.analysis_tool.sma_long:
                     self._warmup_pair_history(pair)
 
                 self._update_airbag_history(pair, current_price)
@@ -1804,18 +1805,25 @@ class TradingBot:
                         f"{label_map.get(p, p[:4])}:{self.pair_signals.get(p, '?')}" for p in self.trade_pairs
                     ])
 
-                    # Unified USD presentation display
-                    status_msg = (
-                        f"[{iteration}] {pair_status} | {regime_state}/{pause_state} | Best: {best_pair or 'NONE'} ({best_signal}) "
-                        f"| Bal: ${current_balance:.2f} | Start: ${self.initial_balance_fiat:.2f} "
-                        f"| NetCF: +${self.net_deposits_fiat:.2f}/-${self.net_withdrawals_fiat:.2f} "
-                        f"| AdjPnL: ${adjusted_pnl:+.2f} | TotalPnL: ${self.cumulative_pnl_fiat(current_balance):+.2f} | Trades: {self.trade_count}"
-                    )
-                    #I commented this out to make it stop double posting.
-                    #self.logger.info(status_msg)
+# Telemetry data variables
+                    adjusted_pnl = self._adjusted_pnl_fiat(current_balance)
+                    total_pnl = self.cumulative_pnl_fiat(current_balance)
+                    regime_state = "RISK_ON" if self._is_risk_on_regime() else "RISK_OFF"
+                    pause_state = "PAUSED" if self._is_temporarily_paused() else "ACTIVE"
 
-                    # Fix: Carriage return first, instantly wipe any wrapped terminal lines, then print clean
-                    print(f"\r\033[2K{status_msg}", end="", flush=True)
+                    # 1. Clear out any horizontal cursor remnants on the current row
+                    print("\r\033[K", end="")
+
+                    # 2. Print a beautifully formatted, multi-line fixed dashboard box
+                    print(f"\033[1;36m" + "="*85 + "\033[0m")
+                    print(f" [\033[1;33mLoop Tick #{iteration}\033[0m]  Market Status: \033[1;32m{regime_state}/{pause_state}\033[0m  |  Active Signals: {pair_status}")
+                    print(f" Balance: \033[1;37m${current_balance:.2f}\033[0m  (Started: ${self.initial_balance_fiat:.2f})  |  Net Capital Flow: +${self.net_deposits_fiat:.2f}/-${self.net_withdrawals_fiat:.2f}")
+                    print(f" Performance: Adj P&L: \033[1;32m${adjusted_pnl:+.2f}\033[0m  |  Total Profit: \033[1;32m${total_pnl:+.2f}\033[0m  |  Executed Trades: \033[1;35m{self.trade_count}\033[0m")
+                    print(f" Best Market Target: \033[1;34m{best_pair or 'NONE'}\033[0m ({best_signal})")
+                    print(f"\033[1;36m" + "="*85 + "\033[0m")
+
+                    # 3. ANSI Escape: Move cursor exactly 6 rows UP to keep the dashboard static
+                    print("\033[6A", end="", flush=True)
 
                     if self.enable_bear_shield:
                         bear_now = self._is_bear_market()
@@ -1989,6 +1997,7 @@ class TradingBot:
                 if not asks or not bids:
                     return
                 best_ask = float(asks[0][0])
+                best_ask_vol = float(asks[0][1])  # Added this line to define the volume variable
                 best_bid = float(bids[0][0])
                 mid = (best_ask + best_bid) / 2.0 if best_bid and best_ask else None
                 if mid is None:
