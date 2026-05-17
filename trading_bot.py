@@ -1980,37 +1980,53 @@ class TradingBot:
                 return
 
             volume = self._calculate_volume(pair, price, available_fiat=planned_fiat)
-            self.logger.info(f"Placing BUY order (MAKER/POST-ONLY): {volume:.6f} {pair} at ${price:.2f}")
+
+            # Use a validation flag instead of raw returns to protect the main loop sleep timer
+            is_valid_book = True
 
             try:
                 exec_cfg = self.config.get('execution', {}) if isinstance(self.config, dict) else {}
                 max_spread_pct = float(exec_cfg.get('max_spread_pct', 0.5))
                 min_book_fill_ratio = float(exec_cfg.get('min_book_fill_ratio', 0.5))
                 ob = self.api_client.get_order_book(pair, count=3)
+
                 if not ob:
-                    return
-                data_key = next((k for k in ob if k != 'last'), None)
-                if not data_key:
-                    return
-                asks = ob[data_key].get('asks', [])
-                bids = ob[data_key].get('bids', [])
-                if not asks or not bids:
-                    return
-                best_ask = float(asks[0][0])
-                best_ask_vol = float(asks[0][1])  # Added this line to define the volume variable
-                best_bid = float(bids[0][0])
-                mid = (best_ask + best_bid) / 2.0 if best_bid and best_ask else None
-                if mid is None:
-                    return
-                spread_pct = ((best_ask - best_bid) / mid) * 100.0
-                planned_notional = planned_fiat
-                if spread_pct > max_spread_pct:
-                    return
-                if (best_ask * best_ask_vol) < (planned_notional * min_book_fill_ratio):
-                    return
-            except Exception:
+                    is_valid_book = False
+                else:
+                    data_key = next((k for k in ob if k != 'last'), None)
+                    if not data_key:
+                        is_valid_book = False
+                    else:
+                        asks = ob[data_key].get('asks', [])
+                        bids = ob[data_key].get('bids', [])
+                        if not asks or not bids:
+                            is_valid_book = False
+                        else:
+                            best_ask = float(asks[0][0])
+                            best_ask_vol = float(asks[0][1])
+                            best_bid = float(bids[0][0])
+                            mid = (best_ask + best_bid) / 2.0 if best_bid and best_ask else None
+
+                            if mid is None:
+                                is_valid_book = False
+                            else:
+                                spread_pct = ((best_ask - best_bid) / mid) * 100.0
+                                planned_notional = planned_fiat
+                                if spread_pct > max_spread_pct:
+                                    self.logger.info(f"BUY skipped for {pair}: Spread too wide ({spread_pct:.2f}%)")
+                                    is_valid_book = False
+                                if (best_ask * best_ask_vol) < (planned_notional * min_book_fill_ratio):
+                                    self.logger.info(f"BUY skipped for {pair}: Insufficient order book depth")
+                                    is_valid_book = False
+            except Exception as book_err:
+                self.logger.debug(f"Order book guard error: {book_err}")
+                is_valid_book = False
+
+            # Only proceed with order placement if book checks passed
+            if not is_valid_book:
                 return
 
+            self.logger.info(f"Placing BUY order (MAKER/POST-ONLY): {volume:.6f} {pair} at ${price:.2f}")
             result = self._place_live_order(pair=pair, direction='buy', volume=volume, price=price, post_only=True)
             if result:
                 self.trade_count += 1
