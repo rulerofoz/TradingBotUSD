@@ -87,7 +87,13 @@ if log_file:
     except Exception as e:
         print(f"Warning: Could not configure log file {log_file}: {e}")
 
+#_sh = logging.StreamHandler(sys.stdout)
+#_sh.setFormatter(_fmt)
+#root_logger.addHandler(_sh)
+#Trying to get this to print better
 _sh = logging.StreamHandler(sys.stdout)
+# 1. Force the terminal screen logger to ONLY output warnings, errors, or critical messages
+_sh.setLevel(logging.WARNING)
 _sh.setFormatter(_fmt)
 root_logger.addHandler(_sh)
 
