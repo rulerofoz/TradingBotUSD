@@ -752,6 +752,7 @@ class KrakenAPI:
     def get_ledgers(self, asset=None, start=None, fetch_all=False, max_pages=200):
         """Fetch ledger entries (deposits/withdrawals/trades/etc)."""
         # FORCE BYPASS FOR SANDBOX KEYS (Saves API Rate Limits & Stops Permission Errors)
+        # TODO: Remove this temporary sandbox short-circuit once production API ledger keys are verified
         return {}
         try:
             params = {}

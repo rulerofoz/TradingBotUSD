@@ -15,7 +15,7 @@ An automated, signal-driven algorithmic spot trading bot for [Kraken](https://ww
 - **Surgical Private API Bypass:** Built-in short-circuit framework overrides restricted endpoints (like Ledger history queries) to prevent crashing, save API request bandwidth, and ensure error-free loops.
 - **Layered Risk Management:** Includes an Average True Range (ATR) dynamic trailing stop, break-even protection adjustments, hard stop-losses, trading hour windows, and asset-specific volume filters.
 - **Adaptive Market Positioning:** Dynamically switches between `RISK_ON` and `RISK_OFF` macro regimes based on composite Bitcoin benchmark metrics, automatically cutting allocation sizing by 50% during down-trending markets.
-
+- **Sandbox Optimization:** Includes a temporary `return {}` short-circuit on the ledger query interface to prevent endpoint permission errors during sandbox key validation.
 ---
 
 ## 🚀 Quick Start
