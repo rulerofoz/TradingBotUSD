@@ -1811,8 +1811,9 @@ class TradingBot:
                         f"| NetCF: +${self.net_deposits_fiat:.2f}/-${self.net_withdrawals_fiat:.2f} "
                         f"| AdjPnL: ${adjusted_pnl:+.2f} | TotalPnL: ${self.cumulative_pnl_fiat(current_balance):+.2f} | Trades: {self.trade_count}"
                     )
-                    self.logger.info(status_msg)
-                    print(f"\r{status_msg}", end="", flush=True)
+                    #I commented this out to make it stop double posting.
+                    #self.logger.info(status_msg)
+                    print(f"\r{status_msg}\033[K", end="", flush=True)
 
                     if self.enable_bear_shield:
                         bear_now = self._is_bear_market()
