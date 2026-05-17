@@ -1813,7 +1813,9 @@ class TradingBot:
                     )
                     #I commented this out to make it stop double posting.
                     #self.logger.info(status_msg)
-                    print(f"\r{status_msg}\033[K", end="", flush=True)
+
+                    # Fix: Carriage return first, instantly wipe any wrapped terminal lines, then print clean
+                    print(f"\r\033[2K{status_msg}", end="", flush=True)
 
                     if self.enable_bear_shield:
                         bear_now = self._is_bear_market()
