@@ -1825,17 +1825,19 @@ class TradingBot:
                         f"{label_map.get(p, p[:4])}:{self.pair_signals.get(p, '?')}" for p in self.trade_pairs
                     ])
 
+                    # 1. Overwrite TUI Panel Horizon Lock
+                    # Pulls up exactly 6 lines to match the dashboard depth perfectly
                     if iteration > 1:
-                        print("\033[5A\r", end="")
+                        print("\033[6A\r", end="")
 
-                    # Print the multi-line dashboard panel cleanly
+                    # 2. Print Pristine 6-Line Dashboard Frame
                     total_pnl = self.cumulative_pnl_fiat(current_balance)
                     print(f"\033[1;36m" + "="*85 + "\033[0m")
                     print(f" [\033[1;33mLoop Tick #{iteration}\033[0m]  Market Status: \033[1;32m{regime_state}/{pause_state}\033[0m  |  Active Signals: {pair_status}")
                     print(f" Balance: \033[1;37m${current_balance:.2f}\033[0m  (Started: ${self.initial_balance_fiat:.2f})  |  Net Capital Flow: +${self.net_deposits_fiat:.2f}/-${self.net_withdrawals_fiat:.2f}")
                     print(f" Performance: Adj P&L: \033[1;32m${adjusted_pnl:+.2f}\033[0m  |  Total Profit: \033[1;32m${total_pnl:+.2f}\033[0m  |  Executed Trades: \033[1;35m{self.trade_count}\033[0m")
                     print(f" Best Market Target: \033[1;34m{best_pair or 'NONE'}\033[0m ({best_signal})")
-                    print(f"\033[1;36m" + "="*85 + "\033[0m", end="", flush=True)
+                    print(f"\033[1;36m" + "="*85 + "\033[0m", end="\n", flush=True)
 
                     if self.enable_bear_shield:
                         bear_now = self._is_bear_market()
