@@ -161,8 +161,6 @@ class TradingBot:
         self.regime_min_score = float(self.config.get('risk_management', {}).get('regime_min_score', -5.0))
         self.enable_hard_stop_loss = bool(self.config.get('risk_management', {}).get('enable_hard_stop_loss', True))
         self.hard_stop_loss_percent = float(self.config.get('risk_management', {}).get('hard_stop_loss_percent', 4.0))
-        self.enable_hard_stop_loss = bool(self.config.get('risk_management', {}).get('enable_hard_stop_loss', True))
-        self.hard_stop_loss_percent = float(self.config.get('risk_management', {}).get('hard_stop_loss_percent', 4.0))
         self.enable_mtf_regime_scoring = bool(self.config.get('risk_management', {}).get('enable_mtf_regime_scoring', True))
         self.mtf_regime_min_score = float(self.config.get('risk_management', {}).get('mtf_regime_min_score', -2.0))
         self.enable_time_stop = bool(self.config.get('risk_management', {}).get('enable_time_stop', True))
@@ -187,6 +185,12 @@ class TradingBot:
         self.fast_scalp_time_stop_minutes = int(self.config.get('profiles', {}).get('fast_scalp', {}).get('time_stop_minutes', 30))
         self.fast_scalp_stop_loss_pct = float(self.config.get('profiles', {}).get('fast_scalp', {}).get('stop_loss_percent', 0.6))
         self.fast_scalp_take_profit_pct = float(self.config.get('profiles', {}).get('fast_scalp', {}).get('take_profit_percent', 1.2))
+
+        # Core Intercept Override: Force base variables to scale if fast scalp profile is true
+        if self.enable_fast_scalp:
+            self.take_profit_percent = self.fast_scalp_take_profit_pct
+            self.hard_stop_loss_percent = self.fast_scalp_stop_loss_pct
+            self.stop_loss_percent = self.fast_scalp_stop_loss_pct
 
         self.start_time = datetime.now()
         self.last_config_reload = datetime.now()
@@ -435,9 +439,17 @@ class TradingBot:
             vol_multiplier = (target_vol_pct / max(0.1, volatility_ratio))
             vol_multiplier = max(0.3, min(3.0, vol_multiplier))
             amount *= vol_multiplier
+        else:
+            # Timing Protection Fallback: Ensures your trade amounts never break
+            # if the ATR indicator buffer is still warming up.
+            amount *= 1.0
 
         amount *= self._allocation_multiplier()
-        return min(base_amount * 1.5, amount, available_fiat * 0.95)
+
+        # Safe Minimum Floor: Ensures planned_fiat never drops below your auto sizing minimums
+        min_auto_notional = float(self.config.get('risk_management', {}).get('min_auto_scale_notional', 1.0))
+        final_amount = min(base_amount * 1.5, amount, available_fiat * 0.95)
+        return max(min_auto_notional + 0.1, final_amount)
 
     def _is_mtf_trend_bullish(self, pair):
         try:
@@ -620,6 +632,12 @@ class TradingBot:
             self.partial_exit_trigger_pct = float(tech_cfg.get('partial_exit_trigger_pct', self.partial_exit_trigger_pct))
             self.partial_exit_fraction = float(tech_cfg.get('partial_exit_fraction', self.partial_exit_fraction))
             self.partial_exit_min_remaining_fiat = float(tech_cfg.get(f'partial_exit_min_remaining_{self.base_currency.lower()}', self.partial_exit_min_remaining_fiat))
+
+            # Dynamic Config Overrides for profiles
+            self.enable_fast_scalp = bool(self.config.get('profiles', {}).get('fast_scalp', {}).get('enabled', False))
+            self.fast_scalp_time_stop_minutes = int(self.config.get('profiles', {}).get('fast_scalp', {}).get('time_stop_minutes', 30))
+            self.fast_scalp_stop_loss_pct = float(self.config.get('profiles', {}).get('fast_scalp', {}).get('stop_loss_percent', 0.6))
+            self.fast_scalp_take_profit_pct = float(self.config.get('profiles', {}).get('fast_scalp', {}).get('take_profit_percent', 1.2))
 
             self.last_config_reload = datetime.now()
             self.loop_interval_sec = int(self.config.get('bot_settings', {}).get('loop_interval_seconds', self.loop_interval_sec))
@@ -1251,40 +1269,22 @@ class TradingBot:
     def _compute_atr(self, pair, period=None):
         try:
             p = period if period is not None else self.atr_period
-            try:
-                ohlc = self.api_client.get_ohlc_data(pair, interval=60)
-                if ohlc:
-                    data_key = next((k for k in ohlc if k != 'last'), None)
-                    if data_key:
-                        series = ohlc[data_key]
-                        if len(series) >= p + 1:
-                            trs = []
-                            prev_close = float(series[0][4])
-                            for row in series[-(p+1):]:
-                                high = float(row[2])
-                                low = float(row[3])
-                                close = float(row[4])
-                                tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-                                trs.append(tr)
-                                prev_close = close
-                            if trs:
-                                return float(sum(trs[-p:]) / len(trs[-p:]))
-            except Exception:
-                pass
 
-            try:
-                import numpy as _np
-                history = list(self.analysis_tool.pair_price_history.get(pair, []))
-                if not history or len(history) < 2:
-                    return None
-                prices = _np.array(history)
-                tr = _np.abs(_np.diff(prices))
-                if len(tr) < p:
-                    return float(_np.mean(tr)) if len(tr) > 0 else None
-                return float(_np.mean(tr[-p:]))
-            except Exception:
+            # Read straight from the pre-existing history buffers in RAM
+            # Completely cuts out network dependencies and hidden API failure traps
+            history = list(self.analysis_tool._get_price_history(pair))
+            if not history or len(history) < 2:
                 return None
-        except Exception:
+
+            import numpy as _np
+            prices = _np.array(history)
+            tr = _np.abs(_np.diff(prices))
+
+            if len(tr) < p:
+                return float(_np.mean(tr)) if len(tr) > 0 else None
+            return float(_np.mean(tr[-p:]))
+        except Exception as e:
+            self.logger.debug(f"ATR memory calculation fallback error: {e}")
             return None
 
     def _required_take_profit_percent(self, pair):
@@ -1370,6 +1370,17 @@ class TradingBot:
             return 0.1
 
     def check_take_profit_or_stop_loss(self):
+        # Establish base risk bounds from standard configurations
+        base_tp = self.take_profit_percent
+        base_sl = self.hard_stop_loss_percent if self.enable_hard_stop_loss else self.stop_loss_percent
+        base_time_limit_sec = self.time_stop_hours * 3600
+
+        # Fast Scalp Dynamic Intercept Override
+        if getattr(self, 'enable_fast_scalp', False):
+            base_tp = float(getattr(self, 'fast_scalp_take_profit_pct', 1.2))
+            base_sl = float(getattr(self, 'fast_scalp_stop_loss_pct', 0.6))
+            base_time_limit_sec = int(getattr(self, 'fast_scalp_time_stop_minutes', 30)) * 60
+
         for pair in self.trade_pairs:
             current_price = self.pair_prices.get(pair, 0)
             if current_price <= 0:
@@ -1383,15 +1394,31 @@ class TradingBot:
 
                 change_percent = self._profit_percent_from_entry(pair, current_price)
                 if change_percent is not None:
-                    # Optimization Integration: Dynamic Break-Even Safety Ratchet
-                    if self.enable_break_even and change_percent >= self.break_even_trigger_pct:
-                        entry_price = self.purchase_prices.get(pair, 0)
-                        if entry_price > 0:
-                            current_stop = self.stop_info.get(pair, {}).get('stop_price', 0)
-                            if current_stop < entry_price:
-                                self.stop_info[pair] = {'stop_price': entry_price, 'type': 'BREAK_EVEN'}
-                                self.logger.info(f"RISK PROTECTION: Break-even stop ratcheted to entry for {pair}")
+                    # 1. Dynamic Overridden Take Profit Check
+                    if change_percent >= base_tp:
+                        return pair, "TAKE_PROFIT", change_percent
 
+                    # 2. Dynamic Overridden Hard Stop Loss Check
+                    if change_percent <= -abs(base_sl):
+                        return pair, "HARD_STOP", change_percent
+
+                    # 3. Dynamic Overridden Time Stop Check
+                    if self.enable_time_stop:
+                        opened_at = self.entry_timestamps.get(pair)
+                        if opened_at and (time.time() - opened_at) >= base_time_limit_sec:
+                            return pair, "TIME_STOP", change_percent
+
+                    # 4. Break-Even Safety Stop Ratchet
+                    if self.enable_break_even and (change_even_trigger := getattr(self, 'break_even_trigger_pct', 1.5)):
+                        if change_percent >= change_even_trigger:
+                            entry_price = self.purchase_prices.get(pair, 0)
+                            if entry_price > 0:
+                                current_stop = self.stop_info.get(pair, {}).get('stop_price', 0)
+                                if current_stop < entry_price:
+                                    self.stop_info[pair] = {'stop_price': entry_price, 'type': 'BREAK_EVEN'}
+                                    self.logger.info(f"RISK PROTECTION: Break-even stop ratcheted to entry for {pair}")
+
+                    # 5. ATR Volatility Trailing Stop Tracker
                     if self.enable_atr_stop:
                         atr = self._compute_atr(pair)
                         if atr:
@@ -1413,19 +1440,6 @@ class TradingBot:
                     if s_price is not None and current_price <= s_price:
                         return pair, stop_data.get('type', 'STOP'), change_percent
 
-                    if not self.enable_atr_stop:
-                        req_tp = self._required_take_profit_percent(pair)
-                        if self.take_profit_percent > 0 and change_percent >= req_tp:
-                            return pair, "TAKE_PROFIT", change_percent
-
-                    if self.enable_hard_stop_loss and change_percent <= -abs(self.hard_stop_loss_percent):
-                        return pair, "HARD_STOP", change_percent
-
-                    if self.enable_time_stop:
-                        opened_at = self.entry_timestamps.get(pair)
-                        if opened_at and (time.time() - opened_at) >= (self.time_stop_hours * 3600):
-                            return pair, "TIME_STOP", change_percent
-
                     if not self.enable_atr_stop and self.trailing_stop_percent > 0 and change_percent > 0:
                         drop_from_peak = ((self.peak_prices[pair] - current_price) / self.peak_prices[pair]) * 100.0
                         if drop_from_peak >= self.trailing_stop_percent:
@@ -1441,7 +1455,7 @@ class TradingBot:
                     return pair, "SHORT_HARD_STOP", short_change_percent
                 if self.enable_time_stop:
                     opened_at = self.entry_timestamps.get(pair)
-                    if opened_at and (time.time() - opened_at) >= (self.time_stop_hours * 3600):
+                    if opened_at and (time.time() - opened_at) >= base_time_limit_sec:
                         return pair, "SHORT_TIME_STOP", short_change_percent
 
         return None, None, None
@@ -1664,8 +1678,6 @@ class TradingBot:
                     else:
                         current_price = self.pair_prices.get(pair, 0)
 
-                # Optimization Integration: In-Place Cache Flush Guard
-                # Prevents history arrays from expanding boundlessly on every cycle loop
                 if len(self.analysis_tool._get_price_history(pair)) < self.analysis_tool.sma_long:
                     self.analysis_tool._get_price_history(pair).clear()
                     self._warmup_pair_history(pair)
@@ -1813,8 +1825,6 @@ class TradingBot:
                         f"{label_map.get(p, p[:4])}:{self.pair_signals.get(p, '?')}" for p in self.trade_pairs
                     ])
 
-                    # Optimization Integration: Rigid Static TUI Frame Lock
-                    # Wipes previous frame lines smoothly rather than stacking trails down the screen history
                     if iteration > 1:
                         print("\033[5A\r", end="")
 
@@ -1843,47 +1853,43 @@ class TradingBot:
                         price = self.pair_prices.get(best_pair, 0)
                         if best_signal == "BUY":
                             score = float(self.pair_scores.get(best_pair, 0.0))
-                            if self._is_temporarily_paused():
-                                continue
-                            if self._daily_drawdown_hit():
-                                continue
-                            if score < self.min_buy_score:
-                                continue
-                            if self._count_open_positions() >= self.max_open_positions:
-                                continue
-                            if not self._is_trading_hours():
-                                continue
+
+                            # Standard Timing Gatekeeper Flag
+                            is_buy_approved = True
+
+                            if self._is_temporarily_paused() or self._daily_drawdown_hit():
+                                is_buy_approved = False
+                            elif score < self.min_buy_score or self._count_open_positions() >= self.max_open_positions:
+                                is_buy_approved = False
+                            elif not self._is_trading_hours() or self._bear_mode_active or self.sentiment_active:
+                                is_buy_approved = False
+                            elif not self._is_mtf_trend_bullish(best_pair) or not self._is_ema_trend_bullish(best_pair):
+                                is_buy_approved = False
+                            elif not self._is_mtf_macd_buy_aligned(best_pair) or not self._has_sufficient_volume(best_pair):
+                                is_buy_approved = False
 
                             try:
                                 now = time.time()
                                 if (now - self._regime_cache.get('ts', 0)) > self._regime_cache_ttl:
                                     self._update_regime_cache()
                                 if self.enable_regime_filter and not bool(self._regime_cache.get('risk_on', True)):
-                                    continue
+                                    is_buy_approved = False
                             except Exception:
                                 pass
 
-                            if self._bear_mode_active:
-                                continue
-                            if self.sentiment_active:
-                                continue
-                            if not self._is_mtf_trend_bullish(best_pair):
-                                continue
-                            if not self._is_ema_trend_bullish(best_pair):
-                                continue
-                            if not self._is_mtf_macd_buy_aligned(best_pair):
-                                continue
-                            if not self._has_sufficient_volume(best_pair):
-                                continue
-                            else:
+                            # Execute order ONLY if all gatekeepers remain True
+                            if is_buy_approved:
                                 try:
                                     if any(g in (best_pair or '').upper() for g in self.reentry_guard_pairs):
                                         last_net = self._last_closed_trade_net_profit_pct(best_pair)
                                         if last_net is not None and last_net < self.min_reentry_profit_pct:
-                                            continue
+                                            is_buy_approved = False
                                 except Exception:
                                     pass
-                                self.execute_buy_order(best_pair, price)
+
+                                if is_buy_approved:
+                                    self.execute_buy_order(best_pair, price)
+
                         elif best_signal == "SELL":
                             min_vol = self._get_min_volume(best_pair)
                             if self.holdings.get(best_pair, 0) >= min_vol:
@@ -1983,7 +1989,6 @@ class TradingBot:
 
             volume = self._calculate_volume(pair, price, available_fiat=planned_fiat)
 
-            # Use a validation flag instead of raw returns to protect the main loop sleep timer
             is_valid_book = True
 
             try:
@@ -2024,7 +2029,6 @@ class TradingBot:
                 self.logger.debug(f"Order book guard error: {book_err}")
                 is_valid_book = False
 
-            # Only proceed with order placement if book checks passed
             if not is_valid_book:
                 return
 

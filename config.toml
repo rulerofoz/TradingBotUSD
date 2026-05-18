@@ -193,3 +193,15 @@ target_balance_usd = 250.0
 
 # ADD THIS LINE: Placeholder to appease the strict config validator rules
 trade_amount_eur = 20.0
+
+
+
+
+#Optional Fast Scalp Profile.
+#Comment out to disable.
+[profiles.fast_scalp]
+enabled = true
+require_enable_flag = true
+time_stop_minutes = 30
+stop_loss_percent = 0.6
+take_profit_percent = 1.2
