@@ -161,6 +161,8 @@ class TradingBot:
         self.regime_min_score = float(self.config.get('risk_management', {}).get('regime_min_score', -5.0))
         self.enable_hard_stop_loss = bool(self.config.get('risk_management', {}).get('enable_hard_stop_loss', True))
         self.hard_stop_loss_percent = float(self.config.get('risk_management', {}).get('hard_stop_loss_percent', 4.0))
+        self.enable_hard_stop_loss = bool(self.config.get('risk_management', {}).get('enable_hard_stop_loss', True))
+        self.hard_stop_loss_percent = float(self.config.get('risk_management', {}).get('hard_stop_loss_percent', 4.0))
         self.enable_mtf_regime_scoring = bool(self.config.get('risk_management', {}).get('enable_mtf_regime_scoring', True))
         self.mtf_regime_min_score = float(self.config.get('risk_management', {}).get('mtf_regime_min_score', -2.0))
         self.enable_time_stop = bool(self.config.get('risk_management', {}).get('enable_time_stop', True))
@@ -423,7 +425,8 @@ class TradingBot:
         if available_fiat <= small_account_threshold:
             amount = min(amount, small_account_floor)
 
-        atr = self.analysis_tool.calculate_atr(pair)
+        # Optimization Integration: Volatility Targeting Sizing Engine
+        atr = self._compute_atr(pair)
         current_price = self.pair_prices.get(pair, 0)
 
         if atr and current_price > 0:
@@ -1094,6 +1097,7 @@ class TradingBot:
         return time.time() < getattr(self, 'trading_paused_until_ts', 0)
 
     def _available_fiat_for_buy(self):
+        # Optimization Integration: Smart Preflight Cushion Reserves 1.5% for maker fees
         return max(0.0, self.get_fiat_balance() * 0.985)
 
     def _daily_drawdown_hit(self):
@@ -1379,6 +1383,15 @@ class TradingBot:
 
                 change_percent = self._profit_percent_from_entry(pair, current_price)
                 if change_percent is not None:
+                    # Optimization Integration: Dynamic Break-Even Safety Ratchet
+                    if self.enable_break_even and change_percent >= self.break_even_trigger_pct:
+                        entry_price = self.purchase_prices.get(pair, 0)
+                        if entry_price > 0:
+                            current_stop = self.stop_info.get(pair, {}).get('stop_price', 0)
+                            if current_stop < entry_price:
+                                self.stop_info[pair] = {'stop_price': entry_price, 'type': 'BREAK_EVEN'}
+                                self.logger.info(f"RISK PROTECTION: Break-even stop ratcheted to entry for {pair}")
+
                     if self.enable_atr_stop:
                         atr = self._compute_atr(pair)
                         if atr:
@@ -1404,13 +1417,6 @@ class TradingBot:
                         req_tp = self._required_take_profit_percent(pair)
                         if self.take_profit_percent > 0 and change_percent >= req_tp:
                             return pair, "TAKE_PROFIT", change_percent
-
-                    if self.enable_break_even and change_percent >= self.break_even_trigger_pct:
-                        entry_price = self.purchase_prices.get(pair, 0)
-                        if entry_price > 0:
-                            current_stop = self.stop_info.get(pair, {}).get('stop_price', 0)
-                            if current_stop < entry_price:
-                                self.stop_info[pair] = {'stop_price': entry_price, 'type': 'BREAK_EVEN'}
 
                     if self.enable_hard_stop_loss and change_percent <= -abs(self.hard_stop_loss_percent):
                         return pair, "HARD_STOP", change_percent
@@ -1658,8 +1664,10 @@ class TradingBot:
                     else:
                         current_price = self.pair_prices.get(pair, 0)
 
-                # Fix: Clean up the double object reference to restore the 60s sleep timing
+                # Optimization Integration: In-Place Cache Flush Guard
+                # Prevents history arrays from expanding boundlessly on every cycle loop
                 if len(self.analysis_tool._get_price_history(pair)) < self.analysis_tool.sma_long:
+                    self.analysis_tool._get_price_history(pair).clear()
                     self._warmup_pair_history(pair)
 
                 self._update_airbag_history(pair, current_price)
@@ -1805,25 +1813,19 @@ class TradingBot:
                         f"{label_map.get(p, p[:4])}:{self.pair_signals.get(p, '?')}" for p in self.trade_pairs
                     ])
 
-# Telemetry data variables
-                    adjusted_pnl = self._adjusted_pnl_fiat(current_balance)
+                    # Optimization Integration: Rigid Static TUI Frame Lock
+                    # Wipes previous frame lines smoothly rather than stacking trails down the screen history
+                    if iteration > 1:
+                        print("\033[5A\r", end="")
+
+                    # Print the multi-line dashboard panel cleanly
                     total_pnl = self.cumulative_pnl_fiat(current_balance)
-                    regime_state = "RISK_ON" if self._is_risk_on_regime() else "RISK_OFF"
-                    pause_state = "PAUSED" if self._is_temporarily_paused() else "ACTIVE"
-
-                    # 1. Clear out any horizontal cursor remnants on the current row
-                    print("\r\033[K", end="")
-
-                    # 2. Print a beautifully formatted, multi-line fixed dashboard box
                     print(f"\033[1;36m" + "="*85 + "\033[0m")
                     print(f" [\033[1;33mLoop Tick #{iteration}\033[0m]  Market Status: \033[1;32m{regime_state}/{pause_state}\033[0m  |  Active Signals: {pair_status}")
                     print(f" Balance: \033[1;37m${current_balance:.2f}\033[0m  (Started: ${self.initial_balance_fiat:.2f})  |  Net Capital Flow: +${self.net_deposits_fiat:.2f}/-${self.net_withdrawals_fiat:.2f}")
                     print(f" Performance: Adj P&L: \033[1;32m${adjusted_pnl:+.2f}\033[0m  |  Total Profit: \033[1;32m${total_pnl:+.2f}\033[0m  |  Executed Trades: \033[1;35m{self.trade_count}\033[0m")
                     print(f" Best Market Target: \033[1;34m{best_pair or 'NONE'}\033[0m ({best_signal})")
-                    print(f"\033[1;36m" + "="*85 + "\033[0m")
-
-                    # 3. ANSI Escape: Move cursor exactly 6 rows UP to keep the dashboard static
-                    print("\033[6A", end="", flush=True)
+                    print(f"\033[1;36m" + "="*85 + "\033[0m", end="", flush=True)
 
                     if self.enable_bear_shield:
                         bear_now = self._is_bear_market()

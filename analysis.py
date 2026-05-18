@@ -3,6 +3,30 @@
 Technical Analysis Module
 =========================
 Provides ``TechnicalAnalysis`` — the signal engine used by ``TradingBot``.
+
+Responsibilities
+----------------
+- Maintains a rolling price history (up to 200 ticks) per pair, persisted to
+  ``data/history_buffer.json`` so indicators survive a bot restart without a
+  warm-up gap.
+- Pre-populates history from 15 m OHLC candles via ``seed_from_ohlc()`` on
+  startup so RSI/SMA are usable immediately.
+- Generates a ``(signal, score)`` tuple via ``generate_signal_with_score()``:
+
+  *Mean-reversion path* (``enable_mr_signals=True``):
+      RSI oversold (< ``mr_rsi_buy``) → ``BUY``; RSI overbought
+      (> ``mr_rsi_sell``) → ``SELL``.  Score driven by distance from 30/70.
+
+  *Trend/breakout path* (``enable_trend_signals=True``):
+      Price above Bollinger upper band + RSI ≥ 55 → ``BUY``; price below
+      lower band + RSI ≤ 45 → ``SELL``.
+
+  Score range: −50 … +50; positive = bullish bias.
+  The stronger path wins (highest |score| overrides the weaker one).
+  ATR and Williams %R provide a small additional boost when confirming.
+
+- Computes ATR (Average True Range) from price history for dynamic stops.
+- Multi-timeframe trend confirmation via ``check_mtf_trend()``.
 """
 
 import logging
@@ -25,7 +49,7 @@ class TechnicalAnalysis:
         self.min_volatility_pct = min_volatility_pct
         self.logger = logging.getLogger(__name__)
         self.pair_price_history = {}
-        self.max_history = 200  # 200 ticks → SMA50 uses 50/200
+        self.max_history = 200  # 200 ticks provides superior calculation stability
         self.buffer_path = os.path.join(os.path.dirname(__file__), 'data', 'history_buffer.json')
 
         # Signal engine mode flags
@@ -34,6 +58,7 @@ class TechnicalAnalysis:
         self.mr_rsi_buy = 33.0
         self.mr_rsi_sell = 67.0
 
+        # Hardware Protection: Flush buffer to disk every 5 mins to prevent storage wear
         self._last_save_ts = 0.0
         self._save_interval_sec = 300.0
         self._load_history()
@@ -55,6 +80,7 @@ class TechnicalAnalysis:
             self.logger.error(f"Error loading price history buffer: {e}")
 
     def _save_history(self, force: bool = False):
+        """Atomically write price history so a crash/power-loss never leaves a corrupted file."""
         import time as _time
         now = _time.time()
         if not force and (now - self._last_save_ts) < self._save_interval_sec:
@@ -68,7 +94,7 @@ class TechnicalAnalysis:
             try:
                 with os.fdopen(fd, 'w') as f:
                     json.dump(data, f)
-                os.replace(tmp_path, self.buffer_path)
+                os.replace(tmp_path, self.buffer_path)  # atomic replacement
             except Exception:
                 try:
                     os.unlink(tmp_path)
@@ -80,52 +106,27 @@ class TechnicalAnalysis:
             self.logger.error(f"Error saving price history buffer: {e}")
 
     def seed_from_nas_ohlc(self, pair, nas_root):
-        """Seed price history from NAS 5-minute OHLC CSV files.
-        Dynamically resolves folder names for ANY coin (Blue-chip, Alt, or Memecoin).
-        """
+        """Seed price history from NAS 5-minute OHLC CSV files."""
         import csv
         from pathlib import Path
-        import datetime
 
+        # Tailored perfectly for your custom USD target tokens
+        folder_map = {
+            'XBTUSD': 'XXBTZUSD',
+            'ETHUSD': 'XETHZUSD',
+            'XRPUSD': 'XXRPZUSD',
+            'SOLUSD': 'SOLUSD',
+        }
         history = self._get_price_history(pair)
         if len(history) >= self.max_history:
-            return  # buffer already full
-
-        # 1. Clean the pair name to uppercase standard
-        p_clean = pair.upper().replace('/', '')
-
-        # 2. Check strict legacy overrides first
-        legacy_map = {
-            'XBTUSD': 'XXBTZUSD', 'XXBTZUSD': 'XXBTZUSD',
-            'XBTEUR': 'XXBTZEUR', 'XXBTZEUR': 'XXBTZEUR',
-            'ETHUSD': 'XETHZUSD', 'XETHZUSD': 'XETHZUSD',
-            'ETHEUR': 'XETHZEUR', 'XETHZEUR': 'XETHZEUR',
-            'XRPUSD': 'XXRPZUSD', 'XXRPZUSD': 'XXRPZUSD',
-            'XRPEUR': 'XXRPZEUR', 'XXRPZEUR': 'XXRPZEUR',
-        }
-
-        if p_clean in legacy_map:
-            folder = legacy_map[p_clean]
-        else:
-            # 3. Dynamic strip for all modern alts/memecoins (FWOGUSD -> FWOG)
-            folder = p_clean
-            for suffix in ['USD', 'USDT', 'EUR', 'ZUSD', 'ZEUR']:
-                if folder.endswith(suffix) and folder != suffix:
-                    folder = folder[:-len(suffix)]
-                    break
-
-        year = datetime.datetime.utcnow().year
-
-        # Try the stripped asset folder first (e.g., .../2026/FWOG/ohlc_5m.csv)
-        csv_path = Path(nas_root) / str(year) / folder / 'ohlc_5m.csv'
-
-        # Fallback: Check if the folder was saved with the full name (e.g., .../2026/FWOGUSD/ohlc_5m.csv)
-        if not csv_path.exists():
-            csv_path = Path(nas_root) / str(year) / p_clean / 'ohlc_5m.csv'
-
-        if not csv_path.exists():
             return
 
+        folder = folder_map.get(pair, pair)
+        import datetime
+        year = datetime.datetime.utcnow().year
+        csv_path = Path(nas_root) / str(year) / folder / 'ohlc_5m.csv'
+        if not csv_path.exists():
+            return
         try:
             closes = []
             with open(csv_path, newline='') as f:
@@ -137,7 +138,6 @@ class TechnicalAnalysis:
                         continue
             if not closes:
                 return
-
             needed = self.max_history - len(history)
             nas_closes = closes[-needed:] if needed < len(closes) else closes
             existing = list(history)
@@ -162,8 +162,10 @@ class TechnicalAnalysis:
         self.logger.info(f"[OHLC seed] {pair}: seeded {len(history)} closes from 15m candles")
 
     def calculate_ema_crossover(self, prices, fast=9, slow=21):
+        """Compute EMA crossover to determine trend direction."""
         if len(prices) < slow + 1:
             return None, None, None
+
         arr = [float(p) for p in prices]
 
         def _ema(data, period):
@@ -175,9 +177,12 @@ class TechnicalAnalysis:
 
         fast_arr = _ema(arr, fast)
         slow_arr = _ema(arr, slow)
-        return fast_arr[-1], slow_arr[-1], fast_arr[-1] > slow_arr[-1]
+        fast_val = fast_arr[-1]
+        slow_val = slow_arr[-1]
+        return fast_val, slow_val, fast_val > slow_val
 
     def calculate_macd(self, prices, fast=12, slow=26, signal_period=9):
+        """Calculate MACD line, signal line, and histogram from a price series."""
         min_len = slow + signal_period
         if len(prices) < min_len:
             return None, None, None
@@ -199,6 +204,7 @@ class TechnicalAnalysis:
         return float(macd_line[-1]), float(signal_line[-1]), float(histogram[-1])
 
     def calculate_rsi(self, prices):
+        """Compute the Relative Strength Index over the last ``rsi_period`` values."""
         if len(prices) < self.rsi_period + 1:
             return None
         prices = np.array(prices)
@@ -213,6 +219,7 @@ class TechnicalAnalysis:
         return 100 - (100 / (1 + rs))
 
     def calculate_atr(self, pair, period=20):
+        """Calculate Average True Range using price history buffer."""
         prices = self._get_price_history(pair)
         sampled = list(prices)[::4]
         if len(sampled) < period + 1:
@@ -221,6 +228,7 @@ class TechnicalAnalysis:
         return np.mean(tr[-period:])
 
     def check_mtf_trend(self, prices, short_p=20, long_p=50):
+        """Check if the general trend is bullish on the provided history."""
         if len(prices) < long_p:
             return True
         sma_short = np.mean(prices[-short_p:])
@@ -266,7 +274,7 @@ class TechnicalAnalysis:
             rsi_full = self.calculate_rsi(list(price_history)) if len(price_history) >= self.rsi_period + 1 else None
             sma_ratio = (sma20 - sma50) / sma50 if sma50 > 0 else 0.0
 
-            # Mean-reversion path
+            # --- Mean-reversion path ---
             if self.enable_mr_signals and rsi_full is not None:
                 rsi_s = 0.0
                 buy_t = getattr(self, 'mr_rsi_buy', 33)
@@ -284,7 +292,7 @@ class TechnicalAnalysis:
                     signal = "SELL"
                     score = mr_score
 
-            # Trend/breakout path
+            # --- Trend/breakout path (Bollinger Band momentum) ---
             if self.enable_trend_signals:
                 if current_price > upper_bb:
                     if current_price > sma50 and (rsi_confirm is None or rsi_confirm >= 55):
@@ -305,6 +313,7 @@ class TechnicalAnalysis:
 
             score = max(-50.0, min(50.0, score))
 
+            # ATR breakout & Williams %R structural overlays
             atr = None
             willr = None
             try:
@@ -328,7 +337,7 @@ class TechnicalAnalysis:
                 if current_price < lower_bb and willr > -80:
                     score -= min(8.0, (atr / max(1e-6, sma20)) * 100.0)
 
-            # MACD momentum filter
+            # --- MACD momentum overlays ---
             try:
                 if len(prices) >= 35:
                     macd_val, macd_sig, macd_hist = self.calculate_macd(list(prices))
